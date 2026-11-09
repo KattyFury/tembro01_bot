@@ -1,22 +1,22 @@
 name: tempo-runner
 
 on:
-  workflow_dispatch: {}          # bấm chạy tay
+  workflow_dispatch: {}          # manual run
   schedule:
-    # Gõ cửa mỗi ~15 phút (lệch phút, tránh đúng mốc :00/:30 GitHub hay nghẽn) suốt cả ngày UTC.
-    # Bản thân engine.mjs mới là nơi quyết định có thực sự chạy hay không: mỗi ngày tự chọn
-    # 0-10 mốc giờ ngẫu nhiên trong nửa ngày ACTIVE_WINDOW (biến Variable, "0-12" hoặc "12-24"
-    # giờ VN — bắt buộc set, xem README mục 2), cron gọi bao nhiêu lần cũng chỉ "bắn" đúng
-    # lúc chạm 1 mốc trong plan đó.
+    # Poll every ~15 minutes (offset minutes avoid the :00/:30 marks GitHub often congests) all UTC day.
+    # engine.mjs itself decides whether to really run: each day it picks
+    # 0-10 random times within the ACTIVE_WINDOW half-day (Variable, "0-12" or "12-24"
+    # Vietnam time, required, see README section 2). However often cron calls, it only "fires"
+    # when it reaches a time in that plan.
     - cron: "3,18,33,48 * * * *"
 
-# Không cho 2 lần chạy chồng nhau (tránh push state đè nhau)
+# Prevent overlapping runs (avoid state pushes overwriting each other)
 concurrency:
   group: tempo-runner
   cancel-in-progress: false
 
 permissions:
-  contents: write                # để commit state ngược về repo
+  contents: write                # to commit state back to the repo
 
 jobs:
   run:
@@ -35,7 +35,7 @@ jobs:
         run: |
           curl -fsSL https://tempo.xyz/install | bash
           echo "$HOME/.tempo/bin" >> "$GITHUB_PATH"
-          # Hâm nóng để launcher tải sẵn extension tempo-request
+          # Warm up so the launcher pre-downloads the tempo-request extension
           "$HOME/.tempo/bin/tempo" request --help >/dev/null 2>&1 || true
 
       - name: Khôi phục ví Tempo từ secret (nếu dùng credential login)
@@ -56,7 +56,7 @@ jobs:
           MODE: live
           TEMPO_BIN: tempo request
           BOT_NAME: ${{ vars.BOT_NAME || github.event.repository.name }}
-          # Chạy tay (Run workflow) thì bỏ qua khung giờ; cron vẫn theo ACTIVE_WINDOW
+          # Manual runs (Run workflow) skip the window; cron still follows ACTIVE_WINDOW
           FORCE_ACTIVE: ${{ github.event_name == 'workflow_dispatch' && '1' || '' }}
           ACTIVE_WINDOW: ${{ vars.ACTIVE_WINDOW }}
           DAILY_CAP: ${{ vars.DAILY_CAP || '0.16' }}

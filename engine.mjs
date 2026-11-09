@@ -1,10 +1,10 @@
-// tempo-runner — engine gọi dịch vụ MPP, não OpenAI (không trả qua Tempo nữa, đỡ tốn USDC).
-// 1 lần chạy = 1 "lượt". Trên VPS, daemon.mjs gọi file này lặp lại (jitter vài phút).
+// tempo-runner: engine calling MPP services, OpenAI brain (no longer paid via Tempo, saving USDC).
+// 1 run = 1 "round". On a VPS, daemon.mjs calls this file repeatedly (a few minutes of jitter).
 //
-// MODE=mock  -> không gọi mạng, giả lập mọi thứ (miễn phí, test logic).
-// MODE=live  -> gọi thật qua binary tempo-request (tốn USDC) + OpenAI API (tốn credit OpenAI riêng).
+// MODE=mock  -> no network, simulate everything (free, tests logic).
+// MODE=live  -> real calls via the tempo-request binary (costs USDC) + OpenAI API (separate OpenAI credit).
 //
-// State (log, strikes, spend, history dịch vụ/yêu cầu đã gọi) nằm trong ./state.
+// State (log, strikes, spend, history of services/requests called) lives in ./state.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -13,21 +13,21 @@ import { execFileSync } from "node:child_process";
 
 const __dir = path.dirname(fileURLToPath(import.meta.url));
 
-// ---------- Cấu hình ----------
+// ---------- Config ----------
 const MODE = (process.env.MODE || "mock").toLowerCase();
 const BOT_NAME = process.env.BOT_NAME || "tempo-runner";
 const TEMPO_BIN = process.env.TEMPO_BIN || "tempo-request";
-const PRIVATE_KEY = process.env.TEMPO_PRIVATE_KEY || "";        // rỗng = dùng ví đã login sẵn (VPS)
-const DAILY_CAP = Number(process.env.DAILY_CAP || "0.16");     // trần USDC/ngày (~$5/tháng ÷ 30)
-const STRIKE_LIMIT = Number(process.env.STRIKE_LIMIT || "3");  // fail mấy lần thì gạch khỏi danh sách
-const MOCK_ITERS = Number(process.env.MOCK_ITERS || "1");      // mock chạy mấy lượt liên tiếp
-const MOCK_FAIL = (process.env.MOCK_FAIL || "").split(",").filter(Boolean); // ép fail service id
+const PRIVATE_KEY = process.env.TEMPO_PRIVATE_KEY || "";        // empty = use the already logged-in wallet (VPS)
+const DAILY_CAP = Number(process.env.DAILY_CAP || "0.16");     // USDC cap per day (~$5/month ÷ 30)
+const STRIKE_LIMIT = Number(process.env.STRIKE_LIMIT || "3");  // failures before striking a service off the list
+const MOCK_ITERS = Number(process.env.MOCK_ITERS || "1");      // consecutive rounds for mock
+const MOCK_FAIL = (process.env.MOCK_FAIL || "").split(",").filter(Boolean); // force-fail a service id
 
-// Não OpenAI (thay cho Haiku-qua-Tempo cũ) -- billed riêng qua tài khoản OpenAI, không đụng ví USDC.
+// OpenAI brain (replacing the old Haiku-via-Tempo), billed separately to the OpenAI account, doesn't touch the USDC wallet.
 const OPENAI_API = process.env.OPENAI_API || process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
-// Check số dư ví on-chain (USDC.e là token TIP-20 -- vẫn đọc balanceOf chuẩn ERC-20 qua RPC).
+// Check on-chain wallet balance (USDC.e is a TIP-20 token, still read with standard ERC-20 balanceOf via RPC).
 const RPC_URL = process.env.TEMPO_RPC_URL || "https://rpc.tempo.xyz";
 const TOKEN_ADDRESS = process.env.USDC_TOKEN_ADDRESS || "0x20c000000000000000000000b9537d11c60e8b50";
 const WALLET_ADDRESS = process.env.WALLET_ADDRESS || "";
@@ -41,30 +41,30 @@ const PLAN_FILE = path.join(STATE_DIR, "plan.json");
 const HISTORY_FILE = path.join(STATE_DIR, "history.json");
 const BALANCE_ALERT_FILE = path.join(STATE_DIR, "balance_alert.json");
 
-// Khung giờ hoạt động: BẮT BUỘC mỗi bot chọn đúng 1 trong 2 nửa ngày (VN time), không dùng chung
-// 1 khung nữa -- đặt ACTIVE_WINDOW="0-12" hoặc "12-24" trong .env của từng bot.
+// Active window: each bot MUST pick exactly 1 of 2 half-days (Vietnam time), no shared
+// window anymore: set ACTIVE_WINDOW="0-12" or "12-24" in each bot's .env.
 const ACTIVE_WINDOW = process.env.ACTIVE_WINDOW || "";
 let ACTIVE_START_HOUR, ACTIVE_END_HOUR;
 if (ACTIVE_WINDOW === "0-12") { ACTIVE_START_HOUR = 0; ACTIVE_END_HOUR = 12; }
 else if (ACTIVE_WINDOW === "12-24") { ACTIVE_START_HOUR = 12; ACTIVE_END_HOUR = 24; }
-else if (MODE === "mock") { ACTIVE_START_HOUR = 7; ACTIVE_END_HOUR = 22; } // test cục bộ, không ép buộc
+else if (MODE === "mock") { ACTIVE_START_HOUR = 7; ACTIVE_END_HOUR = 22; } // local test, not enforced
 else { throw new Error('ACTIVE_WINDOW phải là "0-12" hoặc "12-24" (đặt trong .env của bot này)'); }
 const ACTIVE_START_MIN = ACTIVE_START_HOUR * 60;
 const ACTIVE_END_MIN = ACTIVE_END_HOUR * 60;
 
-const MIN_GAP_MIN = 45;            // 2 lượt cách nhau tối thiểu 45 phút
-const MIN_DAILY_RUNS = Number(process.env.MIN_DAILY_RUNS || "0");   // 1 ngày có thể 0 lượt
+const MIN_GAP_MIN = 45;            // at least 45 minutes between rounds
+const MIN_DAILY_RUNS = Number(process.env.MIN_DAILY_RUNS || "0");   // a day can have 0 rounds
 const MAX_DAILY_RUNS = Number(process.env.MAX_DAILY_RUNS || "10");
-const HISTORY_KEEP = 300;          // giữ tối đa 300 dòng lịch sử
-const RECENT_CONTEXT = 20;         // số dòng gần nhất đưa vào prompt cho não tránh lặp
-const DEDUP_WINDOW = 15;           // chỉ chặn lặp trong N yêu cầu GẦN NHẤT (không cấm 1 chủ đề vĩnh
-                                   // viễn -- nếu so với toàn bộ history thì với vài dịch vụ + não
-                                   // ít sáng tạo, không gian câu "an toàn" cạn dần -> mọi đề xuất
-                                   // đều trùng -> skip mãi, bot đứng hình. Cửa sổ trượt phá deadlock đó.)
+const HISTORY_KEEP = 300;          // keep at most 300 history lines
+const RECENT_CONTEXT = 20;         // recent lines included in the prompt so the brain avoids repeats
+const DEDUP_WINDOW = 15;           // only block repeats within the LAST N requests (doesn't ban a topic forever:
+                                   // against the whole history, with few services and a less creative brain,
+                                   // the space of "safe" questions runs out -> every proposal
+                                   // duplicates -> endless skips, the bot stalls. The sliding window breaks that deadlock.)
 
 const services = JSON.parse(fs.readFileSync(path.join(__dir, "services.json"), "utf8"));
 
-// ---------- Tiện ích ----------
+// ---------- Utilities ----------
 function ensureState() { fs.mkdirSync(STATE_DIR, { recursive: true }); }
 
 function readJSON(f, dflt) {
@@ -72,7 +72,7 @@ function readJSON(f, dflt) {
 }
 function writeJSON(f, obj) { fs.writeFileSync(f, JSON.stringify(obj, null, 2)); }
 
-// Giờ + ngày theo múi Việt Nam (UTC+7)
+// Time + date in Vietnam timezone (UTC+7)
 function vnNow() { return new Date(Date.now() + 7 * 3600 * 1000); }
 function vnDateStr() { return vnNow().toISOString().slice(0, 10); }
 function vnStamp() {
@@ -83,7 +83,7 @@ function vnHour() { return vnNow().getUTCHours(); }
 function vnMinuteOfDay() { const d = vnNow(); return d.getUTCHours() * 60 + d.getUTCMinutes(); }
 
 function withinActiveHours() {
-  if (process.env.FORCE_ACTIVE === "1") return true; // bypass để test
+  if (process.env.FORCE_ACTIVE === "1") return true; // bypass for testing
   const h = vnHour();
   return h >= ACTIVE_START_HOUR && h < ACTIVE_END_HOUR;
 }
@@ -94,7 +94,7 @@ function logLine(service, request, ok) {
   console.log("LOG> " + line);
 }
 
-// Gửi 1 dòng tóm tắt vào Telegram (nếu có TELEGRAM_TOKEN + CHAT_ID). Best-effort, dùng curl (đồng bộ).
+// Send a one-line summary to Telegram (if TELEGRAM_TOKEN + CHAT_ID are set). Best-effort, via curl (synchronous).
 function sendTelegram(text) {
   const tok = process.env.TELEGRAM_TOKEN, chat = process.env.TELEGRAM_CHAT_ID;
   if (!tok || !chat) return;
@@ -112,16 +112,16 @@ function saveStrikes(s) { writeJSON(STRIKES_FILE, s); }
 
 function loadSpend() {
   const s = readJSON(SPEND_FILE, { date: vnDateStr(), spent: 0 });
-  if (s.date !== vnDateStr()) return { date: vnDateStr(), spent: 0 }; // sang ngày mới -> reset
+  if (s.date !== vnDateStr()) return { date: vnDateStr(), spent: 0 }; // new day -> reset
   return s;
 }
 function saveSpend(s) { writeJSON(SPEND_FILE, s); }
 
-// ---------- State: bộ nhớ dịch vụ/yêu cầu đã gọi ----------
-// Dùng để đảm bảo: (1) không lặp lại nguyên văn 1 yêu cầu đã hỏi, (2) không gọi lại 1 dịch vụ
-// vừa mới dùng trong COOLDOWN_CALLS lượt gần nhất -- ép 3 lượt liên tiếp phải là 3 dịch vụ
-// khác nhau hoàn toàn (không chỉ chặn khi lặp y hệt 1 dịch vụ 2 lần liên tiếp, vì kiểu
-// ping-pong "Exa Search <-> Exa Answer" vẫn lọt qua rule đó).
+// ---------- State: memory of services/requests called ----------
+// Ensures: (1) no verbatim repeat of a past request, (2) no service
+// used within the last COOLDOWN_CALLS rounds, forcing 3 consecutive rounds to be 3 completely
+// different services (not only blocking one service twice in a row, because
+// "Exa Search <-> Exa Answer" ping-pong slips through that rule).
 const COOLDOWN_CALLS = 2;
 function loadHistory() { return readJSON(HISTORY_FILE, []); }
 function saveHistory(h) { writeJSON(HISTORY_FILE, h.slice(-HISTORY_KEEP)); }
@@ -137,8 +137,8 @@ function recentSummary(history) {
   return history.slice(-RECENT_CONTEXT).map((h) => `- ${h.service}: ${h.request}`).join("\n") || "(chưa có)";
 }
 
-// Gieo 1 chủ đề ngẫu nhiên vào prompt mỗi lượt để não bớt hội tụ về vài câu "an toàn" lặp đi lặp
-// lại (bug cũ: cứ geocode Eiffel Tower cả tuần). Chỉ là gợi ý mềm, não tự uốn cho hợp dịch vụ.
+// Add a random topic to the prompt each round so the brain converges less on a few repeated "safe" questions
+// (old bug: geocoding the Eiffel Tower all week). Only a soft hint; the brain adapts it to the service.
 const SEED_TOPICS = [
   "renewable energy", "ancient history", "marine biology", "space exploration",
   "culinary traditions", "modern architecture", "machine learning", "classical music",
@@ -153,10 +153,10 @@ const SEED_TOPICS = [
 ];
 function pickSeedTopic() { return SEED_TOPICS[Math.floor(Math.random() * SEED_TOPICS.length)]; }
 
-// ---------- State: kế hoạch giờ chạy ngẫu nhiên trong ngày ----------
-// Mỗi ngày tự chọn N lượt (MIN_DAILY_RUNS..MAX_DAILY_RUNS, có thể là 0) + N mốc giờ ngẫu nhiên
-// (cách nhau tối thiểu MIN_GAP_MIN) trong khung ACTIVE_START_MIN..ACTIVE_END_MIN.
-// Daemon có gọi engine bao nhiêu lần cũng chỉ thực sự "bắn" đúng lúc chạm 1 mốc trong plan.
+// ---------- State: random run plan for the day ----------
+// Each day pick N rounds (MIN_DAILY_RUNS..MAX_DAILY_RUNS, may be 0) + N random times
+// (at least MIN_GAP_MIN apart) within ACTIVE_START_MIN..ACTIVE_END_MIN.
+// However often the daemon calls the engine, it only "fires" when reaching a time in the plan.
 function genTargets() {
   const n = MIN_DAILY_RUNS + Math.floor(Math.random() * (MAX_DAILY_RUNS - MIN_DAILY_RUNS + 1));
   if (n === 0) return [];
@@ -167,7 +167,7 @@ function genTargets() {
     for (let i = 1; i < pts.length; i++) if (pts[i] - pts[i - 1] < MIN_GAP_MIN) { okGap = false; break; }
     if (okGap) return pts;
   }
-  return Array.from({ length: n }, (_, i) => ACTIVE_START_MIN + Math.floor((i + 0.5) * span / n)); // fallback: rải đều
+  return Array.from({ length: n }, (_, i) => ACTIVE_START_MIN + Math.floor((i + 0.5) * span / n)); // fallback: spread evenly
 }
 
 function loadPlan() {
@@ -183,7 +183,7 @@ function loadPlan() {
 function savePlan(p) { writeJSON(PLAN_FILE, p); }
 function fmtMin(m) { return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; }
 
-// Có mốc nào trong plan đã tới giờ mà chưa chạy không? Nếu có, đánh dấu đã dùng và trả về true.
+// Has any planned time arrived and not run? If so, mark it used and return true.
 function claimDueSlot(plan) {
   const now = vnMinuteOfDay();
   for (let i = 0; i < plan.targets.length; i++) {
@@ -196,14 +196,14 @@ function claimDueSlot(plan) {
   return false;
 }
 
-// Danh sách dịch vụ còn sống (chưa bị gạch)
+// Services still alive (not struck off)
 function activeServices(strikes) {
   return services.filter((sv) => (strikes[sv.id]?.fails || 0) < STRIKE_LIMIT);
 }
 
-// ---------- Gọi tempo-request (live) ----------
+// ---------- Call tempo-request (live) ----------
 function tempoRequest({ url, method = "POST", body, headers = {}, maxSpend }) {
-  // Retry để chống lỗi 403/5xx chập chờn của payment-channel
+  // Retry against flaky payment-channel 403/5xx errors
   const args = ["-X", method, "--json", JSON.stringify(body),
     "-m", "120", "--retries", "3", "--retry-http", "403,408,429,500,502,503",
     "--retry-backoff", "1200", "--retry-jitter", "40", "--retry-after"];
@@ -213,7 +213,7 @@ function tempoRequest({ url, method = "POST", body, headers = {}, maxSpend }) {
   args.push(url);
 
   let stdout = "", ok = true, err = "";
-  // TEMPO_BIN có thể là "tempo-request" hoặc dạng launcher "tempo request"
+  // TEMPO_BIN may be "tempo-request" or the launcher form "tempo request"
   const [bin, ...preArgs] = TEMPO_BIN.trim().split(/\s+/);
   try {
     stdout = execFileSync(bin, [...preArgs, ...args], { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 });
@@ -223,15 +223,15 @@ function tempoRequest({ url, method = "POST", body, headers = {}, maxSpend }) {
     stdout = (e.stdout || "").toString();
   }
 
-  // Coi 4xx/5xx problem trong body là thất bại
+  // Treat a 4xx/5xx problem in the body as failure
   if (ok && /"status"\s*:\s*(4|5)\d\d/.test(stdout) && /payment-required|error|problem/i.test(stdout)) ok = false;
 
   return { ok, stdout, err };
 }
 
-// ---------- Não (OpenAI, KHÔNG qua Tempo) ----------
-// menu = danh sách dịch vụ được phép chọn (đã lọc strike + cooldown 2-lần-liên-tiếp).
-// avoidHint = gợi ý thêm khi phải hỏi lại vì lượt trước bị trùng.
+// ---------- Brain (OpenAI, NOT via Tempo) ----------
+// menu = services allowed for selection (strikes and 2-in-a-row cooldown filtered).
+// avoidHint = extra hint when re-asking because the last proposal was a duplicate.
 async function askBrain(menu, history, avoidHint) {
   const menuText = menu.map((s) => `- id="${s.id}" | ${s.name} | ${s.bodyHint}`).join("\n");
   const sys = `You are an autonomous agent that keeps a set of paid web APIs warm by exercising them with realistic, varied requests.
@@ -272,11 +272,11 @@ Rules:
   return JSON.parse(m[0]);
 }
 
-// ---------- Gọi 1 dịch vụ ----------
+// ---------- Call one service ----------
 function callService(svc, body) {
   if (MODE === "mock") {
     const forcedFail = MOCK_FAIL.includes(svc.id);
-    const ok = forcedFail ? false : Math.random() > 0.2; // 80% thành công
+    const ok = forcedFail ? false : Math.random() > 0.2; // 80% success
     return { ok, cost: ok ? svc.priceHint : 0 };
   }
   const res = tempoRequest({
@@ -287,7 +287,7 @@ function callService(svc, body) {
   return { ok: res.ok, cost: res.ok ? svc.priceHint : 0, detail: res.ok ? "" : (res.err || res.stdout).slice(0, 200) };
 }
 
-// ---------- Check số dư ví, báo Telegram nếu sắp cạn ----------
+// ---------- Check wallet balance, warn on Telegram when low ----------
 async function fetchBalanceUSD(address) {
   const data = "0x70a08231000000000000000000000000" + address.replace(/^0x/, "").toLowerCase();
   const res = await fetch(RPC_URL, {
@@ -297,7 +297,7 @@ async function fetchBalanceUSD(address) {
   });
   const json = await res.json();
   if (!json.result) throw new Error("eth_call lỗi: " + JSON.stringify(json).slice(0, 200));
-  return Number(BigInt(json.result)) / 1e6; // TIP-20 decimals luôn là 6
+  return Number(BigInt(json.result)) / 1e6; // TIP-20 decimals are always 6
 }
 
 async function checkBalance() {
@@ -317,7 +317,7 @@ async function checkBalance() {
   }
 }
 
-// ---------- Một lượt ----------
+// ---------- One round ----------
 async function runOnce() {
   if (!withinActiveHours()) {
     console.log(`[skip] Ngoài khung giờ hoạt động ${ACTIVE_START_HOUR}h-${ACTIVE_END_HOUR}h VN (đang ${vnHour()}h VN).`);
@@ -369,9 +369,9 @@ async function runOnce() {
   const r = callService(svc, decision.body);
   logLine(svc.name, requestText, r.ok);
 
-  // Cập nhật strikes
+  // Update strikes
   if (r.ok) {
-    if (strikes[svc.id]) strikes[svc.id].fails = 0; // thành công -> xoá strike
+    if (strikes[svc.id]) strikes[svc.id].fails = 0; // success -> clear strike
   } else {
     const s = strikes[svc.id] || { fails: 0 };
     s.fails += 1; s.lastError = r.detail || "";
@@ -380,11 +380,11 @@ async function runOnce() {
   }
   saveStrikes(strikes);
 
-  // Ghi nhớ dịch vụ + yêu cầu đã gọi (chống trùng lần sau)
+  // Remember the service + request called (anti-duplicate next time)
   history.push({ ts: vnStamp(), serviceId: svc.id, service: svc.name, request: requestText });
   saveHistory(history);
 
-  // Cập nhật chi tiêu (chỉ tính chi phí dịch vụ -- não OpenAI billed riêng, không đụng ví USDC)
+  // Update spend (service cost only; OpenAI brain is billed separately and doesn't touch the USDC wallet)
   const cost = r.cost || 0;
   spend.spent = Math.round((spend.spent + cost) * 1e6) / 1e6;
   saveSpend(spend);

@@ -1,6 +1,6 @@
-// daemon.mjs — chạy engine.mjs liên tục trên VPS, không cần GitHub Actions cron.
-// engine.mjs tự quyết định có hành động hay không mỗi lần được gọi (dựa vào
-// state/plan.json, active hours, daily cap) -- daemon này chỉ "gõ cửa" nó đều đặn.
+// daemon.mjs: runs engine.mjs continuously on a VPS, without GitHub Actions cron.
+// engine.mjs decides whether to act on each call (based on
+// state/plan.json, active hours, daily cap); this daemon only "polls" it regularly.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
