@@ -1,114 +1,111 @@
-# tembro_bot — Bot airdrop Tempo tự động (chạy free trên GitHub Actions)
+# tembro_bot: automatic Tempo airdrop bot (free on GitHub Actions)
 
-Bot tự động gọi các **dịch vụ trả phí trên Tempo (MPP)** để tạo hoạt động on-chain đều đặn — giữ ví "sống" phục vụ airdrop. Não là **OpenAI** (gọi thẳng, KHÔNG qua Tempo — không ăn vào ngân sách USDC). Chạy hoàn toàn **miễn phí trên GitHub Actions**, tự báo **Telegram**, tự ghi log về repo.
+The bot calls **paid services on Tempo (MPP)** to create regular on-chain activity and keep a wallet "alive" for the airdrop. The brain is **OpenAI** (called directly, NOT through Tempo, so it doesn't use the USDC budget). It runs **free on GitHub Actions**, reports to **Telegram**, and writes logs back to the repo.
 
-Mỗi lượt: não tự chọn 1 dịch vụ trong danh sách + tự soạn yêu cầu → gọi → ghi log → báo Telegram. Có **bộ nhớ chống lặp** 3 lớp: (1) 2 dịch vụ vừa dùng gần nhất bị khoá tạm (ép 3 lượt liên tiếp luôn là 3 dịch vụ khác nhau — không chỉ chặn lặp y hệt 1 dịch vụ, vì kiểu ping-pong "Exa Search ↔ Exa Answer" vẫn né được rule yếu hơn); (2) không cho lặp lại 1 yêu cầu đã hỏi trong **15 lượt gần nhất** — nếu não vẫn đề xuất trùng sau khi thử lại 1 lần, bot **tự bỏ lượt đó, không tốn tiền**; (3) mỗi lượt gieo thêm 1 **chủ đề ngẫu nhiên** vào prompt để não bớt hội tụ về vài câu "an toàn".
+Each round: the brain picks 1 service + writes a request → call → log → Telegram. **Three-layer repeat protection:** (1) the last 2 services are temporarily locked, so 3 rounds in a row are always 3 different services; (2) a request from the **last 15 rounds** can't repeat. If the brain still proposes a duplicate after one retry, the bot **skips the round at no cost**; (3) each round adds a **random topic** to the prompt.
 
-> ⚠️ **Bài học (đã sửa):** bản đầu chặn lặp bằng cách so với **toàn bộ** lịch sử → với ít dịch vụ + não ít sáng tạo, không gian câu "an toàn" cạn dần, tới lúc *mọi* đề xuất đều trùng → bot skip mãi, **đứng hình cả tuần** dù vẫn "online". Đổi sang cửa sổ **15 câu gần nhất** + gieo chủ đề ngẫu nhiên mới phá được deadlock đó (bug gốc trước nữa: não stateless nên cứ lặp 1 câu "an toàn" như "quantum computing" cả ngày).
+> ⚠️ **Lesson (fixed):** the first version compared against the **entire** history. With few services and a less creative brain, the space of "safe" questions ran out, every proposal became a duplicate, and the bot **stalled for a week** while "online". The 15-question window plus random topics broke the deadlock.
 
-Dịch vụ nào lỗi 3 lần thì tự bị gạch. Có trần chi tiêu/ngày để **không bao giờ vượt ngân sách** (mặc định ~$5/tháng), và tự báo Telegram khi ví sắp cạn tiền.
+A service failing 3 times is struck off. A daily spending cap means it **never exceeds budget** (default ~$5/month), and Telegram warns when the wallet runs low.
 
-**Số lượt/ngày là ngẫu nhiên, có thể là 0**, không chạy đều đặn cứng nhắc: mỗi ngày bot tự random 0-10 lượt. **Khung giờ hoạt động bắt buộc chọn 1 trong 2 nửa ngày (giờ VN): `0h-12h` hoặc `12h-24h`** — mỗi bot chỉ dùng đúng 1 khung, không còn dùng chung 1 khung 7h-22h cho tất cả bot nữa (để nhiều bot chạy song song trông tự nhiên hơn, không đồng loạt "thức dậy" cùng lúc).
+**Rounds per day are random and can be 0:** 0–10 per day. **Each bot must pick one half-day window (Vietnam time): `0-12` or `12-24`**, so parallel bots look natural and don't all wake together.
 
 ---
 
-## 0. Docs gốc (để tự tra khi cần)
+## 0. Source docs
 
-| Nội dung | Link |
+| Content | Link |
 |---|---|
-| Cài Tempo CLI | `curl -fsSL https://tempo.xyz/install \| bash` |
-| Index toàn bộ docs (LLM-readable) | https://tempo.xyz/developers/llms.txt |
+| Install Tempo CLI | `curl -fsSL https://tempo.xyz/install \| bash` |
+| Full docs index (LLM-readable) | https://tempo.xyz/developers/llms.txt |
 | Tempo Wallet CLI | https://tempo.xyz/docs/cli/wallet |
 | Machine Payments (agent) | https://tempo.xyz/docs/guide/machine-payments/agent |
-| Skill setup wallet | https://tempo.xyz/SKILL.md |
-| Danh bạ dịch vụ MPP (web) | https://mpp.dev/services |
-| Danh bạ dịch vụ (JSON) | https://mpp.dev/api/services |
-| Lấy OpenAI API key | https://platform.openai.com/api-keys |
-| Token **USDC.e** trên Tempo | `0x20c000000000000000000000b9537d11c60e8b50` |
+| Wallet setup skill | https://tempo.xyz/SKILL.md |
+| MPP service directory (web) | https://mpp.dev/services |
+| Service directory (JSON) | https://mpp.dev/api/services |
+| Get an OpenAI API key | https://platform.openai.com/api-keys |
+| **USDC.e** token on Tempo | `0x20c000000000000000000000b9537d11c60e8b50` |
 
-> 💡 Bất kỳ trang docs nào cũng thêm `.md` vào URL để lấy bản markdown thô (vd `.../agent.md`).
+> 💡 Add `.md` to any docs URL for raw markdown.
 
 ---
 
-## 1. Chuẩn bị (làm 1 lần trên máy bạn)
+## 1. Prepare (once, on your machine)
 
-> 🖥️ **Lưu ý hệ điều hành:** Workflow trên GitHub Actions luôn chạy trên **`ubuntu-latest`** (đã cấu hình sẵn trong `run.yml`, bước cài sqlite3 dùng `apt-get` chỉ có trên Ubuntu/Debian — **đừng đổi sang `windows-latest`/`macos-latest`** kẻo hỏng bước cài).
-> Máy cá nhân bạn dùng để test/setup cục bộ thì OS nào cũng được: `MODE=mock` (test miễn phí, mục 3) chạy thuần bằng Node nên Windows/macOS/Linux đều chạy ngon. Riêng lệnh cài Tempo CLI (`curl ... | bash`) và `MODE=live` là bash script — trên Windows cần **Git Bash** hoặc **WSL**, không chạy thẳng được trên CMD/PowerShell.
+> 🖥️ The workflow always runs on **`ubuntu-latest`** (the sqlite3 step uses `apt-get`, so don't change it). Locally, `MODE=mock` works on any OS. The Tempo CLI install and `MODE=live` are bash; on Windows use **Git Bash** or **WSL**.
 
-Cần: **Node.js**, **Git**. Rồi cài Tempo CLI:
+Needs **Node.js** and **Git**. Install the Tempo CLI:
 
 ```bash
 curl -fsSL https://tempo.xyz/install | bash
 export PATH="$HOME/.tempo/bin:$PATH"
-tempo --version   # kiểm tra
+tempo --version
 ```
 
-### 1a. Có ~$5 USDC.e trên Tempo
-
-Đăng nhập 1 ví Tempo rồi nạp tiền:
+### 1a. Have ~$5 USDC.e on Tempo
 
 ```bash
-tempo wallet login          # đăng nhập bằng email/passkey
-tempo wallet fund           # mở luồng nạp USDC (fiat/on-ramp)
-tempo wallet whoami         # xem số dư (cần ~$5 USDC.e)
+tempo wallet login          # sign in with email/passkey
+tempo wallet fund           # USDC top-up flow (fiat/on-ramp)
+tempo wallet whoami         # check balance (need ~$5 USDC.e)
 ```
 
-*(Hoặc bridge USDC từ chain khác sang Tempo qua Circle CCTP — xem docs Tempo.)*
+*(Or bridge USDC from another chain via Circle CCTP, see Tempo docs.)*
 
-### 1b. Tạo **khoá riêng cho bot** (đây là chỗ then chốt ⚠️)
+### 1b. Create a **dedicated bot key** (the key step ⚠️)
 
-**KHÔNG dùng credential login cho GitHub Actions** — key login nằm trong keyring máy + **có hạn dùng**, không đưa lên Actions được. Phải dùng **1 private key thô** (không bao giờ hết hạn):
+**Do NOT use a login credential on GitHub Actions**: it lives in the local keyring and expires. Use a **raw private key**, which never expires:
 
 ```bash
-# tạo cặp khoá bằng viem (cần: npm i viem, hoặc chạy trong 1 project có viem)
+# create a key pair with viem (needs: npm i viem, or run in a project with viem)
 node -e 'import("viem/accounts").then(({generatePrivateKey,privateKeyToAccount})=>{const pk=generatePrivateKey();console.log("PRIVATE_KEY=",pk);console.log("ADDRESS=",privateKeyToAccount(pk).address)})'
 ```
 
-Lưu lại `PRIVATE_KEY` (bí mật!) và `ADDRESS` (địa chỉ công khai — dùng luôn ở bước 1c và làm `WALLET_ADDRESS` ở mục 2).
+Save `PRIVATE_KEY` (secret!) and `ADDRESS` (public, used in 1c and as `WALLET_ADDRESS` in section 2).
 
-### 1c. Chuyển tiền sang khoá bot
+### 1c. Fund the bot key
 
 ```bash
-# tempo wallet transfer <số tiền> <token USDC.e> <ADDRESS khoá bot>
+# tempo wallet transfer <amount> <USDC.e token> <bot key ADDRESS>
 tempo wallet transfer 5 0x20c000000000000000000000b9537d11c60e8b50 <ADDRESS>
 ```
 
-> ⚠️ Khoá này là **"ví nóng"** — chỉ nạp vài $ (coi như cháy được). Không bao giờ commit `PRIVATE_KEY` ra code.
+> ⚠️ This is a **hot wallet**: only a few dollars you can afford to lose. Never commit `PRIVATE_KEY`.
 
-### 1d. Lấy OpenAI API key (não của bot)
+### 1d. Get an OpenAI API key
 
-Não giờ gọi thẳng OpenAI (không qua Tempo, không tốn USDC) — tạo 1 key ở https://platform.openai.com/api-keys, nạp vài $ credit (dùng model rẻ `gpt-4o-mini` nên tốn không đáng kể, xem mục 5).
+Create a key at https://platform.openai.com/api-keys and add a few dollars of credit (`gpt-4o-mini` is cheap, see section 5).
 
 ---
 
-## 2. Dựng bot trên GitHub
+## 2. Set up on GitHub
 
-1. **Fork** repo này (để **public** → GitHub Actions miễn phí không giới hạn phút).
-2. Vào **Settings → Secrets and variables → Actions → New repository secret**, thêm:
+1. **Fork** this repo (keep it **public** for unlimited free Actions minutes).
+2. **Settings → Secrets and variables → Actions → New repository secret:**
 
-   | Secret | Giá trị |
+   | Secret | Value |
    |---|---|
-   | `TEMPO_PRIVATE_KEY` | private key khoá bot (mục 1b) |
-   | `OPENAI_API` | OpenAI API key (mục 1d) — **bắt buộc**, thiếu là bot lỗi ngay lượt đầu |
-   | `TELEGRAM_TOKEN` | token bot Telegram của bạn (tạo từ @BotFather) |
-   | `TELEGRAM_CHAT_ID` | chat id nhận thông báo |
+   | `TEMPO_PRIVATE_KEY` | bot private key (1b) |
+   | `OPENAI_API` | OpenAI API key (1d), **required**; without it the bot fails on the first round |
+   | `TELEGRAM_TOKEN` | your Telegram bot token (from @BotFather) |
+   | `TELEGRAM_CHAT_ID` | chat id for notifications |
 
-3. Tab **Variables** → thêm:
+3. **Variables** tab:
 
-   | Variable | Giá trị |
+   | Variable | Value |
    |---|---|
-   | `ACTIVE_WINDOW` | `0-12` hoặc `12-24` (giờ VN) — **bắt buộc**, mỗi bot chọn đúng 1 nửa. Chạy nhiều bot thì mỗi bot 1 khung khác nhau |
-   | `WALLET_ADDRESS` | địa chỉ ví bot (mục 1b) — để bot tự check số dư on-chain và báo Telegram khi sắp cạn |
-   | `DAILY_CAP` | `0.16` (~$5/tháng). Muốn tốn ít hơn thì để số nhỏ hơn *(tuỳ chọn)* |
+   | `ACTIVE_WINDOW` | `0-12` or `12-24` (Vietnam time), **required**. Multiple bots use different windows |
+   | `WALLET_ADDRESS` | bot wallet address (1b), so it checks its balance and warns on Telegram |
+   | `DAILY_CAP` | `0.16` (~$5/month). Lower to spend less *(optional)* |
 
-4. Vào tab **Actions** → bật workflow.
-5. Bấm **Run workflow** để chạy thử ngay (chạy tay thì bỏ qua khung giờ *và* bỏ qua plan ngẫu nhiên, chạy luôn). Hoặc chờ cron tự chạy trong nửa ngày bạn chọn ở `ACTIVE_WINDOW`.
+4. **Actions** tab → enable the workflow.
+5. **Run workflow** to test now (a manual run skips the window *and* the random plan), or wait for cron during your `ACTIVE_WINDOW`.
 
-Xong! Mỗi lượt bot sẽ nhắn Telegram + cập nhật `state/log.txt` về repo.
+Each round then messages Telegram and updates `state/log.txt`.
 
-### ⚠️ Nếu bạn (hoặc nhóm) chạy nhiều hơn 1 bot cùng lúc
+### ⚠️ Running more than 1 bot
 
-Sửa **phút** trong dòng `cron` của `.github/workflows/run.yml` (mục 4 bên dưới) cho **mỗi bot một bộ số khác nhau**, đừng để tất cả dùng `*/15` hay `*/30` giống hệt nhau. Lý do: GitHub xử lý cron của rất nhiều repo cùng lúc và dễ nghẽn/rớt lịch nếu tất cả bot cùng gõ cửa đúng 1 mốc phút. Vài bộ gợi ý (mỗi người trong nhóm lấy 1 dòng khác nhau):
+Change the **minutes** in the `cron` line of `.github/workflows/run.yml` for **each bot**. Don't use identical `*/15` or `*/30`: GitHub's cron gets congested and drops runs on shared minutes. Suggestions (one line per person):
 
 ```
 "3,18,33,48 0-15 * * *"
@@ -118,118 +115,118 @@ Sửa **phút** trong dòng `cron` của `.github/workflows/run.yml` (mục 4 b�
 "6,21,36,51 0-15 * * *"
 ```
 
-Nhớ **đổi luôn `ACTIVE_WINDOW`** cho mỗi bot (`0-12` / `12-24`) — vừa lệch phút cron, vừa lệch nửa ngày hoạt động, càng đỡ trùng lịch nhau.
+Also **change `ACTIVE_WINDOW`** per bot.
 
 ---
 
-## 3. Test miễn phí trước khi tốn xu nào
+## 3. Free test before spending
 
 ```bash
-# chạy giả lập 15 lượt, KHÔNG gọi mạng, KHÔNG mất tiền:
+# simulate 15 rounds, NO network, NO money:
 MODE=mock FORCE_ACTIVE=1 MOCK_ITERS=15 node engine.mjs
 ```
 
-Xem log ra đúng format `Thời gian – Dịch vụ – Yêu cầu – Thành/Bại`, logic gạch dịch vụ + chặn ngân sách chạy đúng. Chạy đủ nhiều lượt bạn sẽ thấy dòng `[dedup]` (não đề xuất trùng câu cũ, bot tự hỏi lại) và `[diversity]`/việc dịch vụ tự đổi luân phiên — đó là cơ chế chống lặp-mãi-1-câu đang hoạt động.
+Check the log format `Thời gian – Dịch vụ – Yêu cầu – Thành/Bại` (time – service – request – pass/fail) and that strikes and the budget stop work. Over enough rounds you'll see `[dedup]` and `[diversity]`, the repeat protection at work.
 
-Muốn xem thử engine tự chọn giờ ngẫu nhiên trong ngày ra sao (không ép chạy ngay):
+To see how the engine picks random times (without forcing a run):
 
 ```bash
 MODE=mock MOCK_ITERS=1 node engine.mjs
 ```
 
-→ xem dòng `[plan] Ngày mới -> chọn N lượt ngẫu nhiên: ...` in ra, đó là các mốc giờ bot sẽ tự "bắn" hôm đó (có thể là 0 mốc — bình thường).
+See the `[plan] Ngày mới -> chọn N lượt ngẫu nhiên: ...` line for that day's times (0 is normal).
 
 ---
 
-## 4. Tuỳ chỉnh
+## 4. Customize
 
-| Muốn gì | Sửa ở đâu |
+| Goal | Where |
 |---|---|
-| Thêm/bớt dịch vụ | `services.json` (mỗi dịch vụ: url, method, priceHint, bodyHint) |
-| Ngân sách/ngày | Variable `DAILY_CAP` (mặc định $0.16) |
-| Mô hình não | env `OPENAI_MODEL` (mặc định `gpt-4o-mini`, rẻ + hỗ trợ JSON mode) |
-| Số lần fail thì gạch dịch vụ | env `STRIKE_LIMIT` (mặc định **3**) |
-| Số lượt chạy/ngày (random, có thể 0) | env `MIN_DAILY_RUNS` / `MAX_DAILY_RUNS` (mặc định **0**-10) |
-| Khung giờ hoạt động trong ngày | Variable `ACTIVE_WINDOW` = `"0-12"` hoặc `"12-24"` (bắt buộc, không sửa trong code nữa) |
-| Ngưỡng báo ví sắp cạn qua Telegram | env `LOW_BALANCE_USD` (mặc định $1) — cần có `WALLET_ADDRESS` mới check được |
-| Tần suất cron "gõ cửa" | sửa `cron` trong `.github/workflows/run.yml` (giờ UTC = VN − 7) — gõ càng dày thì bot càng dễ bắt trúng đủ số mốc ngẫu nhiên trong ngày |
+| Add/remove services | `services.json` (url, method, priceHint, bodyHint) |
+| Daily budget | Variable `DAILY_CAP` (default $0.16) |
+| Brain model | env `OPENAI_MODEL` (default `gpt-4o-mini`) |
+| Failures before a strike-off | env `STRIKE_LIMIT` (default **3**) |
+| Rounds per day (random, may be 0) | env `MIN_DAILY_RUNS` / `MAX_DAILY_RUNS` (default **0**-10) |
+| Active window | Variable `ACTIVE_WINDOW` = `"0-12"` or `"12-24"` (required) |
+| Low-balance warning | env `LOW_BALANCE_USD` (default $1, needs `WALLET_ADDRESS`) |
+| Cron frequency | `cron` in `.github/workflows/run.yml` (UTC = Vietnam − 7). Denser polling catches more random times |
 
-Tìm thêm dịch vụ rẻ: `tempo wallet services --search <từ khoá>` hoặc https://mpp.dev/services
+Find more cheap services: `tempo wallet services --search <keyword>` or https://mpp.dev/services
 
-> ⚠️ **Trước khi thêm 1 dịch vụ mới vào `services.json`: LUÔN test live thật 1 lượt trước khi để não tự gọi nó.** Không phải dịch vụ nào trong danh bạ cũng đang chạy tốt — lúc mở rộng danh sách (2026-07-08) đã gặp 4/6 dịch vụ mới thử (IPinfo, Holidays, Timezone, Exchange Rates, Codex) trả lỗi 500/502 từ chính hạ tầng của họ (vd Codex báo `ECONNREFUSED 127.0.0.1:4001` — bug phía họ, không phải do sai body). Đáng ngại hơn: có dấu hiệu ví vẫn bị trừ tiền dù call thất bại (thanh toán MPP có thể xảy ra *trước* khi biết upstream có chạy được hay không). Cách test an toàn:
+> ⚠️ **Before adding a service to `services.json`, ALWAYS test one live call first.** When the list was expanded (2026-07-08), several new services (IPinfo, Holidays, Timezone, Exchange Rates, Codex) returned 500/502 from their own infrastructure (e.g. Codex `ECONNREFUSED 127.0.0.1:4001`). There are signs the wallet is charged even when a call fails, since MPP payment may happen before the upstream is known to work. Safe test:
 > ```bash
-> # gọi thẳng 1 endpoint bằng tempo-request, KHÔNG qua não, để xác nhận body đúng + dịch vụ còn sống:
-> tempo-request -X POST --json '<body mẫu>' --private-key <key ví test> <url dịch vụ>
+> # call one endpoint directly, not via the brain, to confirm the body and that the service is alive:
+> tempo-request -X POST --json '<sample body>' --private-key <test wallet key> <service url>
 > ```
-> Chỉ thêm vào `services.json` sau khi thấy response thành công thật.
+> Add it only after a real successful response.
 
 ---
 
-## 5. Chi phí
+## 5. Cost
 
-**Dịch vụ MPP** (Exa, Firecrawl, fal, Codex...): thực đo **~$0.001-0.01/lượt** tuỳ dịch vụ não chọn. Với 0-10 lượt/ngày → tối đa **~$0.16/ngày (~$5/tháng)**, `DAILY_CAP` đảm bảo không bao giờ vượt trần dù có bung lượt nhiều hơn dự kiến.
+**MPP services** (Exa, Firecrawl, fal, Codex...): measured **~$0.001–0.01/round**. With 0–10 rounds/day, at most **~$0.16/day (~$5/month)**. `DAILY_CAP` enforces the ceiling.
 
-**Não OpenAI** (`gpt-4o-mini`): billed **riêng qua tài khoản OpenAI của bạn**, không đụng ví USDC, không tính vào `DAILY_CAP`. Mỗi lượt chỉ vài trăm token → thực tế dưới $0.001/lượt, gần như không đáng kể so với chi phí dịch vụ.
+**OpenAI brain** (`gpt-4o-mini`): billed **separately to your OpenAI account**, not the USDC wallet or `DAILY_CAP`. A few hundred tokens per round, under $0.001.
 
 ---
 
-## 6. Xử lý lỗi thường gặp
+## 6. Common errors
 
-| Lỗi | Nguyên nhân / cách xử |
+| Error | Cause / fix |
 |---|---|
-| `Thiếu OPENAI_API trong .env` | Chưa set secret `OPENAI_API` (mục 2) |
-| `ACTIVE_WINDOW phải là "0-12" hoặc "12-24"` | Chưa set Variable `ACTIVE_WINDOW`, hoặc gõ sai giá trị |
-| `[dedup] ... [skip] Vẫn trùng sau khi thử lại` | **Bình thường**, không phải lỗi — não đề xuất trùng câu đã hỏi 2 lần liên tiếp nên bot tự bỏ lượt để khỏi tốn tiền oan, lượt sau sẽ thử lại |
-| `spawn sqlite3 ENOENT` | Thiếu sqlite3. Workflow đã tự cài; nếu chạy local: `apt install sqlite3` |
-| `HTTP 403 Request not allowed` | Payment-channel chập chờn khi gọi dồn. Engine đã có `--retries` |
-| `verification-failed` / đòi login lại | Bạn đang dùng **credential login** thay vì `--private-key`. Đổi sang khoá thô (mục 1b) |
-| Run cứ `queued` mãi | Actions của repo đang bị tắt → Settings → Actions → cho phép |
-| Cả ngày không thấy lượt nào chạy | Có thể bình thường — mỗi ngày random 0-10 lượt, có ngày rơi trúng 0. Xem `state/plan.json` để biết hôm đó dự tính mấy mốc, so với `state/log.txt` xem đã bắt được mốc nào |
+| `Thiếu OPENAI_API trong .env` | Secret `OPENAI_API` not set (section 2) |
+| `ACTIVE_WINDOW phải là "0-12" hoặc "12-24"` | Variable `ACTIVE_WINDOW` missing or wrong |
+| `[dedup] ... [skip] Vẫn trùng sau khi thử lại` | **Normal.** The brain proposed a duplicate twice, so the bot skipped the round at no cost |
+| `spawn sqlite3 ENOENT` | sqlite3 missing. The workflow installs it; locally: `apt install sqlite3` |
+| `HTTP 403 Request not allowed` | Payment-channel flakiness under bursts. The engine has `--retries` |
+| `verification-failed` / asks to log in | You're using a **login credential** instead of `--private-key`. Use the raw key (1b) |
+| Run stays `queued` | Actions disabled → Settings → Actions → allow |
+| No rounds all day | May be normal (random 0–10). Compare `state/plan.json` with `state/log.txt` |
 
 ---
 
-## 7. Cách hoạt động (kiến trúc)
+## 7. How it works
 
 ```
-GitHub Actions (cron gõ cửa mỗi ~15 phút, lệch phút riêng từng bot)
-  → cài Tempo CLI + sqlite3
+GitHub Actions (cron polls every ~15 minutes, offset per bot)
+  → install Tempo CLI + sqlite3
   → engine.mjs:
-      Kiểm tra state/plan.json — hôm nay đã có kế hoạch 0-10 mốc giờ ngẫu nhiên
-      trong khung ACTIVE_WINDOW (0-12h hoặc 12-24h VN) chưa?
-        Chưa có -> tự random N (0-10) mốc giờ, lưu lại.
-      Đã tới 1 mốc trong plan chưa dùng?
-        Chưa tới -> bỏ qua, không tốn tiền, không log.
-        Tới rồi -> đánh dấu đã dùng, tiếp tục:
-          Đọc state/history.json (dịch vụ + câu hỏi đã gọi trước đó)
-            -> loại dịch vụ vừa bị gọi 2 lần liên tiếp khỏi danh sách được chọn
-          OpenAI (gọi thẳng, không qua Tempo) chọn 1 dịch vụ + soạn request
-            (prompt kèm 1 chủ đề ngẫu nhiên mỗi lượt để đa dạng hoá)
-            -> nếu request trùng 1 câu đã hỏi trong 15 lượt gần nhất, hỏi lại 1 lần;
-               vẫn trùng thì bỏ lượt, không gọi, không tốn tiền
-          → gọi dịch vụ (tempo request --private-key)
-          → ghi state/log.txt + state/history.json, đếm chi tiêu (chặn DAILY_CAP),
-            gạch dịch vụ fail 3 lần
-          → check số dư ví on-chain (USDC.e, đọc balanceOf qua RPC) — báo Telegram
-            nếu dưới LOW_BALANCE_USD
-          → gửi Telegram
-  → commit state/ ngược về repo
+      state/plan.json: does today have a plan of 0-10 random times
+      within ACTIVE_WINDOW (0-12 or 12-24 Vietnam)?
+        No -> pick N (0-10) random times and save.
+      Reached an unused time in the plan?
+        No -> skip, no cost, no log.
+        Yes -> mark used and continue:
+          Read state/history.json (past services + questions)
+            -> remove services just used from the choices
+          OpenAI (direct, not via Tempo) picks 1 service + writes a request
+            (prompt includes 1 random topic per round)
+            -> if it duplicates one of the last 15 rounds, ask once more;
+               still a duplicate: skip, no call, no cost
+          → call the service (tempo request --private-key)
+          → write state/log.txt + state/history.json, count spend (DAILY_CAP),
+            strike off services failing 3 times
+          → check on-chain balance (USDC.e, balanceOf via RPC), Telegram
+            warning if below LOW_BALANCE_USD
+          → send Telegram
+  → commit state/ back to the repo
 ```
 
-State (`state/log.txt`, `spend.json`, `strikes.json`, `plan.json`, `history.json`) được commit về repo mỗi lượt vì Actions không nhớ gì giữa các lần chạy.
+State (`state/log.txt`, `spend.json`, `strikes.json`, `plan.json`, `history.json`) is committed each round because Actions keeps nothing between runs.
 
 ---
 
-## 8. An toàn
+## 8. Safety
 
-- Private key + OpenAI key nằm trong **GitHub Secret** — không bao giờ commit ra code. `.env` đã bị `.gitignore` chặn.
-- Khoá bot = **ví nóng**, chỉ để vài $.
-- Repo **public** để Actions free — nhưng **không có bí mật nào trong code**, chỉ ở Secrets.
-- **Đừng bao giờ** nhúng token GitHub (PAT) thẳng vào URL remote git hay `git config --global url.insteadOf` — nếu máy bị lộ, token dùng được cho *mọi* repo. Nếu cần push tự động, dùng token scope hẹp (fine-grained, đúng 1-2 repo, có ngày hết hạn) và chỉ set trên remote của đúng repo đó.
+- Private key + OpenAI key live in **GitHub Secrets**, never in code. `.gitignore` blocks `.env`.
+- The bot key is a **hot wallet** with a few dollars.
+- The repo is **public** for free Actions, but **no secret is in the code**.
+- **Never** embed a GitHub token (PAT) in a remote URL or `git config --global url.insteadOf`; a leak exposes *every* repo. For auto-push, use a fine-grained token scoped to 1–2 repos with an expiry, set only on that repo's remote.
 
 ---
 
-## 9. Muốn tham gia / fork thêm bot?
+## 9. Fork your own bot
 
-1. Đọc từ mục 1 → làm đúng thứ tự: ví Tempo → khoá riêng → nạp tiền → OpenAI key → fork repo → set Secrets/Variables → bật Actions.
-2. Nếu bạn là người thứ 2, 3... trong nhóm dùng chung ý tưởng này, **nhớ đổi phút cron VÀ đổi `ACTIVE_WINDOW`** (mục 2, phần cảnh báo) để không đụng lịch với bot của người khác.
-3. Có vấn đề gì cứ hỏi trong nhóm — đừng tự ý đổi `DAILY_CAP` lên cao hoặc tắt `STRIKE_LIMIT`, dễ đốt tiền oan nếu 1 dịch vụ đang lỗi mà không hay.
+1. Follow section 1 in order: Tempo wallet → dedicated key → funding → OpenAI key → fork → Secrets/Variables → enable Actions.
+2. If you're the 2nd, 3rd... person in a group, **change the cron minutes AND `ACTIVE_WINDOW`** (section 2).
+3. Don't raise `DAILY_CAP` or disable `STRIKE_LIMIT` on your own: a failing service can burn money unnoticed.
